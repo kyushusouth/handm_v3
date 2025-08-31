@@ -51,9 +51,6 @@ def transform_cat(
 
 
 def main():
-    with open(Path(__file__).parent.joinpath("conf", "config.yaml")) as f:
-        conf = yaml.safe_load(f)
-
     root_dir = Path(__file__).parent.parent
     data_dir = root_dir.parent.joinpath("handm_v2", "data")
     result_dir = root_dir.joinpath("result", datetime.now().strftime("%Y%m%d-%H%M%S"))
