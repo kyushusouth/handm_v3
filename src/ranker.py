@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import shap
-import yaml
+from implicit.cpu.als import AlternatingLeastSquares
 from lightgbm import LGBMRanker, early_stopping, log_evaluation, plot_importance
 from sklearn.preprocessing import OrdinalEncoder
 
@@ -56,15 +56,15 @@ def main():
     result_dir = root_dir.joinpath("result", datetime.now().strftime("%Y%m%d-%H%M%S"))
     result_dir.mkdir(parents=True, exist_ok=True)
     chunksize = 100000
-    past_start_date = pd.to_datetime("2019-08-01")
-    past_end_date = pd.to_datetime("2019-08-31")
-    train_start_date = pd.to_datetime("2020-07-01")
-    train_end_date = pd.to_datetime("2020-07-21")
-    val_start_date = pd.to_datetime("2020-07-22")
-    val_end_date = pd.to_datetime("2020-07-30")
-    test_start_date = pd.to_datetime("2020-08-01")
+    past_start_date = pd.to_datetime("2020-07-01")
+    past_end_date = pd.to_datetime("2020-07-31")
+    train_start_date = pd.to_datetime("2020-08-01")
+    train_end_date = pd.to_datetime("2020-08-17")
+    val_start_date = pd.to_datetime("2020-08-18")
+    val_end_date = pd.to_datetime("2020-08-24")
+    test_start_date = pd.to_datetime("2020-08-25")
     test_end_date = pd.to_datetime("2020-08-31")
-    num_use_customers = 100
+    num_use_customers = 10000
     customer_usecols = [
         "customer_id",
         "FN",
@@ -96,6 +96,10 @@ def main():
         "item_cv_count",
         "user_item_cv_ratio",
         "item_user_cv_ratio",
+        "cooc_sum",
+        "cooc_mean",
+        "jaccard_sum",
+        "jaccard_mean",
     ]
     cat_cols = [
         "FN",
@@ -129,8 +133,15 @@ def main():
         "is_freq_product_type_name_match",
         "is_freq_section_name_match",
     ]
-    num_neg_samples = 5000
+    num_neg_samples = 200
     seed = 42
+
+    # als_past_ids = np.load(root_dir.joinpath("result/20250901-004541/past_ids.npz"))
+    # past_customer_ids = als_past_ids["past_customer_ids"]
+    # past_article_ids = als_past_ids["past_article_ids"]
+    # als = AlternatingLeastSquares.load(
+    #     str(root_dir.joinpath("result/20250901-004541/als.npz"))
+    # )
 
     customer_df = pd.read_csv(
         data_dir.joinpath("customers.csv"), usecols=customer_usecols
@@ -219,14 +230,20 @@ def main():
     _ = transform_cat(val_trans_df, cat_enc)
     _ = transform_cat(test_trans_df, cat_enc)
 
-    user_item_cv_count = past_trans_df.groupby(["customer_id", "article_id"]).agg(
-        user_item_cv_count=("customer_id", "count")
+    user_item_cv_count = (
+        past_trans_df.groupby(["customer_id", "article_id"])
+        .agg(user_item_cv_count=("customer_id", "count"))
+        .reset_index()
     )
-    user_cv_count = past_trans_df.groupby("customer_id").agg(
-        user_cv_count=("customer_id", "count")
+    user_cv_count = (
+        past_trans_df.groupby("customer_id")
+        .agg(user_cv_count=("customer_id", "count"))
+        .reset_index()
     )
-    item_cv_count = past_trans_df.groupby("article_id").agg(
-        item_cv_count=("article_id", "count")
+    item_cv_count = (
+        past_trans_df.groupby("article_id")
+        .agg(item_cv_count=("article_id", "count"))
+        .reset_index()
     )
 
     def merge_cv_count_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -247,6 +264,76 @@ def main():
     train_trans_df = merge_cv_count_df(train_trans_df)
     val_trans_df = merge_cv_count_df(val_trans_df)
     test_trans_df = merge_cv_count_df(test_trans_df)
+
+    item_pair_df = past_trans_df.merge(past_trans_df, on="customer_id", how="inner")
+    item_pair_df = item_pair_df.loc[
+        item_pair_df["article_id_x"] != item_pair_df["article_id_y"]
+    ]
+    cooc_count = (
+        item_pair_df.groupby(["article_id_x", "article_id_y"])
+        .agg(cooc_count=("customer_id", "count"))
+        .reset_index()
+    )
+    cooc_map = {}
+    for row in cooc_count.itertuples():
+        item_x = row.article_id_x
+        item_y = row.article_id_y
+        count = row.cooc_count
+        if item_x not in cooc_map:
+            cooc_map[item_x] = {}
+        cooc_map[item_x][item_y] = count
+
+    item_cv_count_map = item_cv_count.set_index("article_id")["item_cv_count"].to_dict()
+    user_purchased_items_map = (
+        past_trans_df.groupby("customer_id")["article_id"].apply(list).to_dict()
+    )
+
+    def add_cooc_features(df: pd.DataFrame):
+        cooc_sum_list = []
+        cooc_mean_list = []
+        jaccard_sum_list = []
+        jaccard_mean_list = []
+
+        for row in df.itertuples():
+            customer_id = row.customer_id
+            cand_item = row.article_id
+            purchased_items = user_purchased_items_map.get(customer_id, [])
+
+            if not purchased_items:
+                cooc_sum_list.append(0)
+                cooc_mean_list.append(0)
+                jaccard_sum_list.append(0)
+                jaccard_mean_list.append(0)
+                continue
+
+            cooc_scores = []
+            jaccard_scores = []
+            for purchased_item in purchased_items:
+                cooc_count = cooc_map.get(purchased_item, {}).get(cand_item, 0)
+                cooc_scores.append(cooc_count)
+
+                if cooc_count > 0:
+                    item_a_count = item_cv_count_map.get(purchased_item, 0)
+                    item_b_count = item_cv_count_map.get(cand_item, 0)
+                    denom = item_a_count + item_b_count - cooc_count
+                    if denom > 0:
+                        jaccard = cooc_count / denom
+                        jaccard_scores.append(jaccard)
+
+            cooc_sum_list.append(np.sum(cooc_scores))
+            cooc_mean_list.append(np.mean(cooc_scores) if cooc_scores else 0)
+            jaccard_sum_list.append(np.sum(jaccard_scores))
+            jaccard_mean_list.append(np.sum(jaccard_scores) if jaccard_scores else 0)
+
+        df["cooc_sum"] = cooc_sum_list
+        df["cooc_mean"] = cooc_mean_list
+        df["jaccard_sum"] = jaccard_sum_list
+        df["jaccard_mean"] = jaccard_mean_list
+        return df
+
+    train_trans_df = add_cooc_features(train_trans_df)
+    val_trans_df = add_cooc_features(val_trans_df)
+    test_trans_df = add_cooc_features(test_trans_df)
 
     for col in [
         "product_code",
@@ -418,11 +505,9 @@ def main():
         num_sample=("recall", "count"), recall=("recall", "mean"), ndcg=("ndcg", "mean")
     )
 
-    for metric_name in ["recall", "ndcg"]:
+    for metric_name in ["recall", "ndcg", "num_sample"]:
         fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(12, 8))
-        sns.lineplot(
-            metrics_df, x="k", y=metric_name, hue="model", style="eval_type", ax=ax
-        )
+        sns.barplot(metrics_df, x="k", y=metric_name, hue="eval_type", ax=ax)
         fig.tight_layout()
         fig.savefig(result_dir.joinpath(f"{metric_name}.png"))
         plt.close(fig)

@@ -18,6 +18,8 @@ lightgbm = "^4.6.0"
 shap = "^0.48.0"
 sentence-transformers = "^5.1.0"
 tqdm = "^4.67.1"
+implicit = "^0.7.2"
+h5py = "^3.14.0"
 
 
 [build-system]
