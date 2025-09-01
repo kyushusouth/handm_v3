@@ -1,8 +1,11 @@
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from implicit.cpu.als import AlternatingLeastSquares
+from tqdm import tqdm
 
 
 def main():
@@ -69,6 +72,7 @@ def main():
     )
     trans_df = trans_df.loc[trans_df["customer_id"].isin(use_customers)]
     trans_df["is_purchased"] = 1
+    trans_df = trans_df.sort_values("t_dat", ascending=True)
 
     past_trans_df = trans_df.loc[
         (past_start_date <= trans_df["t_dat"]) & (trans_df["t_dat"] <= past_end_date),
@@ -83,8 +87,11 @@ def main():
         customer_df, on="customer_id", how="left"
     ).merge(article_df, on="article_id", how="left")
 
-    num_popular_items = 10
-    num_age_popular_items = 10
+    num_popular_items = 30
+    num_age_popular_items = 30
+    num_als = 30
+    num_purchased_items = 30
+    num_cooc_items = 30
 
     popular_items = (
         past_trans_df.groupby("article_id")
@@ -93,6 +100,7 @@ def main():
         .head(num_popular_items)
         .index.values.tolist()
     )
+
     age_popular_items = (
         past_trans_df.groupby(["age_bin", "article_id"])
         .agg(item_cv_count=("customer_id", "count"))
@@ -104,13 +112,46 @@ def main():
         .apply(list)
         .to_dict()
     )
-
     customer_age_bin_map = customer_df.set_index("customer_id")["age_bin"].to_dict()
+
+    cf_data = np.load(
+        root_dir.joinpath("result/20250902-000339/cf_data.npz"), allow_pickle=True
+    )
+    cf_customer_ids = cf_data["cf_customer_ids"]
+    cf_article_ids = cf_data["cf_article_ids"]
+    cf_matrix = cf_data["cf_matrix"].item()
+    als_customer_map = {cid: i for i, cid in enumerate(cf_customer_ids)}
+    als = AlternatingLeastSquares.load(
+        str(root_dir.joinpath("result/20250902-000339/als.npz"))
+    )
+
+    customer_purchase_items_map = (
+        past_trans_df.groupby("customer_id")["article_id"]
+        .apply(lambda x: list(set(x[:num_purchased_items])))
+        .to_dict()
+    )
+
     recalls = []
-    for customer_id, group_df in future_trans_df.groupby("customer_id"):
+    for customer_id, group_df in tqdm(future_trans_df.groupby("customer_id")):
         age_bin = customer_age_bin_map[customer_id]
         true_items = group_df["article_id"].unique().tolist()
-        pred_items = popular_items + age_popular_items.get(age_bin, [])
+
+        pred_items = popular_items
+
+        pred_items += age_popular_items.get(age_bin, [])
+
+        if customer_id in als_customer_map:
+            customer_index = als_customer_map[customer_id]
+            als_article_indices, _ = als.recommend(
+                customer_index, cf_matrix[customer_index], N=num_als
+            )
+            als_article_ids = [cf_article_ids[index] for index in als_article_indices]
+            pred_items += als_article_ids
+
+        if customer_id in customer_purchase_items_map:
+            purchased_items = customer_purchase_items_map[customer_id]
+            pred_items += purchased_items
+
         recall = len(set(true_items) & set(pred_items)) / len(set(true_items))
         recalls.append(recall)
 

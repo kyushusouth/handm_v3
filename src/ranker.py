@@ -9,6 +9,7 @@ import shap
 from implicit.cpu.als import AlternatingLeastSquares
 from lightgbm import LGBMRanker, early_stopping, log_evaluation, plot_importance
 from sklearn.preprocessing import OrdinalEncoder
+from tqdm import tqdm
 
 from metrics_calculator import MetricsCalculator
 
@@ -56,7 +57,7 @@ def main():
     result_dir = root_dir.joinpath("result", datetime.now().strftime("%Y%m%d-%H%M%S"))
     result_dir.mkdir(parents=True, exist_ok=True)
     chunksize = 100000
-    past_start_date = pd.to_datetime("2020-07-01")
+    past_start_date = pd.to_datetime("2020-01-01")
     past_end_date = pd.to_datetime("2020-07-31")
     train_start_date = pd.to_datetime("2020-08-01")
     train_end_date = pd.to_datetime("2020-08-17")
@@ -96,10 +97,11 @@ def main():
         "item_cv_count",
         "user_item_cv_ratio",
         "item_user_cv_ratio",
-        "cooc_sum",
-        "cooc_mean",
-        "jaccard_sum",
-        "jaccard_mean",
+        # "cooc_sum",
+        # "cooc_mean",
+        # "jaccard_sum",
+        # "jaccard_mean",
+        "als_score",
     ]
     cat_cols = [
         "FN",
@@ -136,13 +138,6 @@ def main():
     num_neg_samples = 200
     seed = 42
 
-    # als_past_ids = np.load(root_dir.joinpath("result/20250901-004541/past_ids.npz"))
-    # past_customer_ids = als_past_ids["past_customer_ids"]
-    # past_article_ids = als_past_ids["past_article_ids"]
-    # als = AlternatingLeastSquares.load(
-    #     str(root_dir.joinpath("result/20250901-004541/als.npz"))
-    # )
-
     customer_df = pd.read_csv(
         data_dir.joinpath("customers.csv"), usecols=customer_usecols
     )
@@ -159,10 +154,10 @@ def main():
         if not filtered_chunk.empty:
             filt_chunks.append(filtered_chunk)
     trans_df = pd.concat(filt_chunks)
-    use_customers = np.random.choice(
-        trans_df["customer_id"].unique(), size=num_use_customers, replace=False
-    )
-    trans_df = trans_df.loc[trans_df["customer_id"].isin(use_customers)]
+    # use_customers = np.random.choice(
+    #     trans_df["customer_id"].unique(), size=num_use_customers, replace=False
+    # )
+    # trans_df = trans_df.loc[trans_df["customer_id"].isin(use_customers)]
     trans_df["is_purchased"] = 1
 
     past_trans_df = trans_df.loc[
@@ -331,9 +326,43 @@ def main():
         df["jaccard_mean"] = jaccard_mean_list
         return df
 
-    train_trans_df = add_cooc_features(train_trans_df)
-    val_trans_df = add_cooc_features(val_trans_df)
-    test_trans_df = add_cooc_features(test_trans_df)
+    # train_trans_df = add_cooc_features(train_trans_df)
+    # val_trans_df = add_cooc_features(val_trans_df)
+    # test_trans_df = add_cooc_features(test_trans_df)
+
+    als_past_ids = np.load(root_dir.joinpath("result/20250901-004541/past_ids.npz"))
+    als_customer_ids = als_past_ids["past_customer_ids"]
+    als_article_ids = als_past_ids["past_article_ids"]
+    als_customer_map = {cid: i for i, cid in enumerate(als_customer_ids)}
+    als_article_map = {aid: i for i, aid in enumerate(als_article_ids)}
+    als = AlternatingLeastSquares.load(
+        str(root_dir.joinpath("result/20250901-004541/als.npz"))
+    )
+
+    def add_als_score_feature(df: pd.DataFrame):
+        customer_indices = (
+            df["customer_id"].map(als_customer_map).fillna(-1).astype(int).values
+        )
+        article_indices = (
+            df["article_id"].map(als_article_map).fillna(-1).astype(int).values
+        )
+        scores = []
+        for user_idx, item_idx in tqdm(
+            zip(customer_indices, article_indices), total=len(df)
+        ):
+            if user_idx != -1 and item_idx != -1:
+                score = als.user_factors[user_idx].dot(als.item_factors[item_idx])
+                scores.append(score)
+            else:
+                scores.append(0)
+        df["als_score"] = scores
+        return df
+
+    train_trans_df = add_als_score_feature(train_trans_df)
+    val_trans_df = add_als_score_feature(val_trans_df)
+    test_trans_df = add_als_score_feature(test_trans_df)
+
+    breakpoint()
 
     for col in [
         "product_code",

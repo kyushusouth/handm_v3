@@ -13,10 +13,8 @@ def main():
     data_dir = root_dir.parent.joinpath("handm_v2", "data")
     result_dir = root_dir.joinpath("result", datetime.now().strftime("%Y%m%d-%H%M%S"))
     result_dir.mkdir(parents=True, exist_ok=True)
-    past_start_date = pd.to_datetime("2020-07-01")
+    past_start_date = pd.to_datetime("2020-01-01")
     past_end_date = pd.to_datetime("2020-07-31")
-    train_start_date = pd.to_datetime("2020-08-01")
-    train_end_date = pd.to_datetime("2020-08-17")
     val_start_date = pd.to_datetime("2020-08-18")
     val_end_date = pd.to_datetime("2020-08-24")
     test_start_date = pd.to_datetime("2020-08-25")
@@ -36,10 +34,10 @@ def main():
         if not filtered_chunk.empty:
             filt_chunks.append(filtered_chunk)
     trans_df = pd.concat(filt_chunks)
-    use_customers = np.random.choice(
-        trans_df["customer_id"].unique(), size=num_use_customers, replace=False
-    )
-    trans_df = trans_df.loc[trans_df["customer_id"].isin(use_customers)]
+    # use_customers = np.random.choice(
+    #     trans_df["customer_id"].unique(), size=num_use_customers, replace=False
+    # )
+    # trans_df = trans_df.loc[trans_df["customer_id"].isin(use_customers)]
     trans_df["is_purchased"] = 1
 
     past_trans_df = trans_df.loc[
@@ -55,17 +53,17 @@ def main():
         ["customer_id", "article_id", "is_purchased"],
     ].copy()
 
-    past_customer_ids = past_trans_df["customer_id"].unique()
+    cf_customer_ids = past_trans_df["customer_id"].unique()
     customer_index_map = {
-        customer_id: index for index, customer_id in enumerate(past_customer_ids)
+        customer_id: index for index, customer_id in enumerate(cf_customer_ids)
     }
 
-    past_article_ids = past_trans_df["article_id"].unique()
+    cf_article_ids = past_trans_df["article_id"].unique()
     article_index_map = {
-        article_id: index for index, article_id in enumerate(past_article_ids)
+        article_id: index for index, article_id in enumerate(cf_article_ids)
     }
     index_article_map = {
-        index: article_id for index, article_id in enumerate(past_article_ids)
+        index: article_id for index, article_id in enumerate(cf_article_ids)
     }
 
     past_trans_df["customer_index"] = past_trans_df["customer_id"].map(
@@ -77,34 +75,35 @@ def main():
     article_indices = past_trans_df["article_index"].values
     is_purchased = past_trans_df["is_purchased"].values
 
-    interaction_matrix = csr_matrix(
+    cf_matrix = csr_matrix(
         (is_purchased, (customer_indices, article_indices)),
-        shape=(past_customer_ids.shape[0], past_article_ids.shape[0]),
+        shape=(cf_customer_ids.shape[0], cf_article_ids.shape[0]),
     )
 
     np.savez(
-        result_dir.joinpath("past_ids"),
-        past_customer_ids=past_customer_ids,
-        past_article_ids=past_article_ids,
+        result_dir.joinpath("cf_data"),
+        cf_customer_ids=cf_customer_ids,
+        cf_article_ids=cf_article_ids,
+        cf_matrix=cf_matrix,
     )
 
     als = AlternatingLeastSquares(factors=64, iterations=15, random_state=random_state)
-    als.fit(interaction_matrix)
+    als.fit(cf_matrix)
     als.save(result_dir.joinpath("als.npz"))
 
     bpr = BayesianPersonalizedRanking(
         factors=64, iterations=100, random_state=random_state
     )
-    bpr.fit(interaction_matrix)
+    bpr.fit(cf_matrix)
     bpr.save(result_dir.joinpath("bpr.npz"))
 
     val_customer_ids = val_trans_df["customer_id"].unique()
-    valid_val_customer_ids = np.intersect1d(past_customer_ids, val_customer_ids)
+    valid_val_customer_ids = np.intersect1d(cf_customer_ids, val_customer_ids)
     valid_val_customer_indices = np.array(
         [customer_index_map[customer_id] for customer_id in valid_val_customer_ids]
     )
     test_customer_ids = test_trans_df["customer_id"].unique()
-    valid_test_customer_ids = np.intersect1d(past_customer_ids, test_customer_ids)
+    valid_test_customer_ids = np.intersect1d(cf_customer_ids, test_customer_ids)
     valid_test_customer_indices = np.array(
         [customer_index_map[customer_id] for customer_id in valid_test_customer_ids]
     )
@@ -113,22 +112,22 @@ def main():
 
     als_val_pred_indices, _ = als.recommend(
         valid_val_customer_indices,
-        interaction_matrix[valid_val_customer_indices],
+        cf_matrix[valid_val_customer_indices],
         N=10,
     )
     als_test_pred_indices, _ = als.recommend(
         valid_test_customer_indices,
-        interaction_matrix[valid_test_customer_indices],
+        cf_matrix[valid_test_customer_indices],
         N=10,
     )
     bpr_val_pred_indices, _ = bpr.recommend(
         valid_val_customer_indices,
-        interaction_matrix[valid_val_customer_indices],
+        cf_matrix[valid_val_customer_indices],
         N=10,
     )
     bpr_test_pred_indices, _ = bpr.recommend(
         valid_test_customer_indices,
-        interaction_matrix[valid_test_customer_indices],
+        cf_matrix[valid_test_customer_indices],
         N=10,
     )
 
@@ -144,7 +143,7 @@ def main():
         true_items_cand = val_customer_purchase_map[customer_id]
         true_items = set()
         for true_item in true_items_cand:
-            if true_item in past_article_ids:
+            if true_item in cf_article_ids:
                 true_items.add(true_item)
 
         if len(true_items) == 0:
@@ -170,7 +169,7 @@ def main():
         true_items_cand = test_customer_purchase_map[customer_id]
         true_items = set()
         for true_item in true_items_cand:
-            if true_item in past_article_ids:
+            if true_item in cf_article_ids:
                 true_items.add(true_item)
 
         if len(true_items) == 0:
