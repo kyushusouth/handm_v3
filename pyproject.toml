@@ -6,7 +6,7 @@ authors = ["Taisuke Minami <tmnm13009@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.12,<3.14"
 pandas = "^2.3.2"
 pydantic = "^2.11.7"
 pyyaml = "^6.0.2"
@@ -20,6 +20,7 @@ sentence-transformers = "^5.1.0"
 tqdm = "^4.67.1"
 implicit = "^0.7.2"
 h5py = "^3.14.0"
+torch = "^2.8.0"
 
 
 [build-system]
